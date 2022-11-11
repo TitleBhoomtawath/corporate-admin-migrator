@@ -12,6 +12,7 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -56,6 +57,7 @@ func readCSV(reader *csv.Reader) ([]keymaker.Credential, error) {
 
 func main() {
 	var (
+		wg          sync.WaitGroup
 		dryrun      bool
 		filePath    string
 		concurrency int
@@ -67,6 +69,7 @@ func main() {
 	flag.BoolVar(&dryrun, "d", false, "default is false")
 	flag.StringVar(&configPath, "config", "", "config file location")
 	flag.Parse()
+	wg.Add(concurrency)
 	if filePath == "" {
 		log.Panic("file is empty")
 	}
@@ -84,6 +87,8 @@ func main() {
 	log.Printf("read %d", total)
 
 	bulkID := 0
+	d := time.Now()
+	bulkPrefix := fmt.Sprintf("%d-%d-%d-", d.Year(), d.Month(), d.Day())
 	for x := 0; x < total; {
 		bulkCred := make([]keymaker.Credential, 0, batchSize)
 		for i := 0; i < batchSize && x < total; i++ {
@@ -91,7 +96,7 @@ func main() {
 			x++
 		}
 		bulks = append(bulks, keymaker.BulkArgs{
-			BulkID:      fmt.Sprintf("batch-%d", bulkID),
+			BulkID:      fmt.Sprintf("%s-%d", bulkPrefix, bulkID),
 			Credentials: bulkCred,
 		})
 		bulkID++
@@ -127,14 +132,15 @@ func main() {
 		Config: conf.SCIM,
 	}
 
-	file, err := os.OpenFile("output.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	since := time.Now()
+	logFileName := "./logs/" + since.Format(time.RFC3339) + ".log"
+	file, err := os.OpenFile(logFileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		log.Panic(err)
 	}
 
 	defer file.Close()
 	logger := log.New(file, "output", log.LstdFlags)
-
 	migrator := Migrator{
 		stsClient:  stsClient,
 		scimClient: client,
@@ -142,29 +148,23 @@ func main() {
 	}
 
 	in := make(chan keymaker.BulkArgs)
-	done := make(chan error)
-
-	since := time.Now()
 
 	for i := 0; i < concurrency; i++ {
-		go migrator.migrateUsers(in, done)
+		go migrator.migrateUsers(in, &wg)
 	}
 
 	fmt.Println("start migrating users")
 	go func() {
-		for i, _ := range bulks {
+		for i := range bulks {
 			in <- bulks[i]
 		}
 		close(in)
 	}()
 
-	for ret := range done {
-		if ret != nil {
-			fmt.Println(ret.Error())
-			fmt.Println("Elapsed time", time.Since(since))
-			break
-		}
-	}
+	wg.Wait()
+	elapsed := time.Since(since)
+	fmt.Println("Elapsed time", elapsed)
+	logger.Printf("Elapsed time %d", elapsed)
 }
 
 type Migrator struct {
@@ -173,7 +173,7 @@ type Migrator struct {
 	logger     *log.Logger
 }
 
-func (m Migrator) migrateUsers(in chan keymaker.BulkArgs, doneChan chan error) {
+func (m Migrator) migrateUsers(in chan keymaker.BulkArgs, wg *sync.WaitGroup) {
 	for args := range in {
 		fmt.Printf("begin batch %s\n", args.BulkID)
 		m.logger.Printf("begin batch %s\n", args.BulkID)
@@ -188,7 +188,9 @@ func (m Migrator) migrateUsers(in chan keymaker.BulkArgs, doneChan chan error) {
 			fmt.Printf("batch %s, path %s status %s\n", r.BulkID, r.Path, r.Status)
 			m.logger.Printf("batch %s, path %s status %s\n", r.BulkID, r.Path, r.Status)
 		}
+		fmt.Printf("done batch %s\n", args.BulkID)
+		m.logger.Printf("done batch %s\n", args.BulkID)
 		time.Sleep(1 * time.Second)
 	}
-	doneChan <- fmt.Errorf("finish")
+	wg.Done()
 }

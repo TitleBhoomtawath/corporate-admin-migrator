@@ -100,6 +100,9 @@ Temporary Items
 .apdisk
 
 src.csv
-output.log
 staging.pem
+production.pem
 config/staging.yaml
+config/production.yaml
+input/
+logs/
